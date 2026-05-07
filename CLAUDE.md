@@ -378,7 +378,7 @@ ltx-2-mlx generate \
   --low-ram -o fox.mp4
 ```
 
-`--low-ram` currently supports one-stage T2V/I2V only. Incompatible with `--lora` (use a pre-fused safetensors). See `## Block Streaming` below for details.
+`--low-ram` is supported on `generate` (one-stage / `--two-stage` / `--hq`), `a2v`, `keyframe`, and `ic-lora`. Bind-time LoRA fusion handles ic-lora's control LoRAs and custom `--distilled-lora-strength`. The `generate --lora` flag is still incompatible (use a pre-fused safetensors via mlx-forge). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -690,16 +690,23 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `generate --hq` (res_2s + CFG)
 - `a2v` (audio-to-video)
 - `keyframe` (interpolation)
+- `ic-lora` (control video conditioning, via bind-time LoRA fusion)
 
-For two-stage / HQ / a2v / keyframe, the Stage 1 → Stage 2 transition swaps the streamer from ``transformer-dev.safetensors`` to the pre-fused ``transformer-distilled.safetensors`` (mlx-forge produces this at LoRA strength 1.0) instead of fusing the distilled LoRA in-place. In-place fusion would force materialization of all 48 blocks. The pipeline raises if a non-default ``--distilled-lora-strength`` is requested.
+Validated runs on M2 Pro 32 GB:
+- bf16 HQ at 480x704x97 (4 sec): 49:38 — would OOM without streaming.
+- q8 HQ at 480x704x97 (4 sec): 44:38.
+- q8 one-stage 480x704x33 (1.3 sec): 2:31.
+
+For two-stage / HQ / a2v / keyframe at default LoRA strength 1.0, the Stage 1 → Stage 2 transition swaps the streamer from ``transformer-dev.safetensors`` to the pre-fused ``transformer-distilled.safetensors`` (mlx-forge produces this at LoRA strength 1.0). For custom ``--distilled-lora-strength`` (or any non-1.0 strength), the streamer keeps the dev model and attaches a ``BlockLoraSource`` that fuses the LoRA delta at each ``bind()`` (dequantize → ``W + B @ A * strength`` → re-quantize for q4/q8).
+
+For `ic-lora`, each control LoRA is attached as a ``BlockLoraSource`` to the streaming wrapper instead of being fused in-place at load time. Stage 2 just clears the source list rather than reloading the whole transformer.
 
 `mx.compile` cannot trace `BatchedPerturbationConfig` (the dataclass passed for STG / modality-isolation passes), so `StreamingLTXModel.__call__` falls back to the eager block whenever ``perturbations`` is non-None. Eager + per-block sync still works thanks to `set_cache_limit(0)`.
 
 ### Limitations
 
-- `ic-lora` does NOT yet support `--low-ram` — Stage 1 fuses an IC-LoRA into the distilled model, which would force materialization of all 48 blocks. Needs bind-time LoRA fusion (planned future work).
-- Incompatible with `--lora` flag (same reason). Use a pre-fused safetensors via mlx-forge.
-- Custom `--distilled-lora-strength` (anything other than 1.0) on two-stage pipelines is also blocked on the same future work.
+- The `generate --lora` flag (per-pipeline LoRA on the one-stage path) is still incompatible with `--low-ram`. It pre-fuses LoRAs into the weight dict at load time, before streaming is set up. Either drop `--low-ram` or pre-fuse via mlx-forge.
+- Bind-time fusion at custom strength is slower than the strength-1.0 swap path: dequantize + re-quantize for every linear in every block, every step. ~50ms per linear × ~50 linears × 48 blocks × num_forward_passes. For 30 stage-1 steps this adds noticeable wall-clock. For typical strengths between 0.8 and 1.2 the strength-1.0 swap output is visually indistinguishable, so prefer it when possible.
 - The compiled-block forward differs from eager by ~1 fp32 ULP (kernel fusion). `tests/test_block_streaming.py::test_wrapper_matches_baseline` uses `mx.allclose(atol=1e-5, rtol=1e-5)` to capture this.
 
 ### Key Files
