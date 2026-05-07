@@ -46,6 +46,22 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--height", "-H", type=int, default=480, help="Video height (default: 480)")
     parser.add_argument("--width", "-W", type=int, default=704, help="Video width (default: 704)")
     parser.add_argument("--frames", "-f", type=int, default=97, help="Number of frames (default: 97)")
+    parser.add_argument(
+        "--low-ram",
+        action="store_true",
+        help=(
+            "Stream transformer blocks from mmap'd safetensors via "
+            "mx.compile + per-block sync + Metal heap release. Cuts "
+            "transformer peak Metal ~75%% (e.g. q8 ~10-12 GB -> ~2.8 GB). "
+            "Targets 16 GB Macs (q8) and 32 GB Macs (bf16). Supported "
+            "on generate (one-stage / --two-stage / --hq), a2v, "
+            "keyframe. Two-stage swaps to pre-fused "
+            "transformer-distilled.safetensors at the stage 1->2 "
+            "transition (requires distilled LoRA strength 1.0). "
+            "Incompatible with --lora and ic-lora (use a pre-fused "
+            "safetensors)."
+        ),
+    )
 
 
 def main() -> None:
@@ -105,19 +121,6 @@ examples:
             "Two-stage (--two-stage / --hq) only: enable TeaCache stage-1 "
             "acceleration (opt-in, ~1.46x speedup on Euler at default thresh; "
             "see CLAUDE.md)"
-        ),
-    )
-    gen.add_argument(
-        "--low-ram",
-        action="store_true",
-        help=(
-            "One-stage T2V/I2V only: stream transformer blocks from "
-            "mmap'd safetensors via mx.compile + per-block sync + "
-            "Metal heap release. Cuts transformer peak Metal from "
-            "~10-12 GB (q8) to ~2.8 GB. Targets 16 GB Macs that "
-            "couldn't run q8 inference otherwise. Slightly slower per "
-            "step (compiled kernels but per-block sync). Incompatible "
-            "with --lora (use a pre-fused safetensors)."
         ),
     )
     gen.add_argument(
@@ -327,6 +330,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             model_dir=args.model,
             gemma_model_id=args.gemma,
             low_memory=True,
+            low_ram_streaming=getattr(args, "low_ram", False),
             dev_transformer=args.dev_transformer,
             distilled_lora=args.distilled_lora,
             distilled_lora_strength=args.distilled_lora_strength,
@@ -427,7 +431,11 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         print(f"Audio: {args.audio}")
         print(f"  Model: {args.model}")
 
-    pipe = PipeClass(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe = PipeClass(
+        model_dir=args.model,
+        gemma_model_id=args.gemma,
+        low_ram_streaming=getattr(args, "low_ram", False),
+    )
     kwargs: dict = dict(
         prompt=args.prompt,
         output_path=args.output,
@@ -544,6 +552,7 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
     pipe = KeyframeInterpolationPipeline(
         model_dir=args.model,
         gemma_model_id=args.gemma,
+        low_ram_streaming=getattr(args, "low_ram", False),
         dev_transformer=args.dev_transformer,
         distilled_lora=args.distilled_lora,
         distilled_lora_strength=args.lora_strength,

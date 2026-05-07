@@ -222,6 +222,8 @@ class TextToVideoPipeline:
         """Load the dev (non-distilled) transformer weights.
 
         Requires ``self._dev_transformer`` to be set by the subclass.
+        Honors ``self.low_ram_streaming`` to stream blocks instead of
+        materializing all 48.
         """
         assert self._dev_transformer is not None, "_dev_transformer must be set before calling _load_dev_transformer()"
         dev_path = self.model_dir / self._dev_transformer
@@ -231,10 +233,30 @@ class TextToVideoPipeline:
                 "This pipeline requires the dev model for CFG guidance.\n"
                 "Use: --model dgrauet/ltx-2.3-mlx-q8"
             )
+        return self._load_transformer_with_optional_streaming(dev_path)
+
+    def _load_transformer_with_optional_streaming(self, transformer_path) -> LTXModel:
+        """Build an LTXModel from the given safetensors, with optional block streaming.
+
+        When ``self.low_ram_streaming`` is True, drops blocks 1..47 before
+        quantization (so apply_quantization only materializes block 0),
+        loads non-block weights via load_weights, and wraps the model in
+        StreamingLTXModel for per-forward block streaming.
+        """
         dit = LTXModel()
-        weights = load_split_safetensors(dev_path, prefix="transformer.")
-        apply_quantization(dit, weights)
-        dit.load_weights(list(weights.items()))
+        weights = load_split_safetensors(transformer_path, prefix="transformer.")
+        if self.low_ram_streaming:
+            from ltx_core_mlx.loader.block_streaming import BlockStreamer, StreamingLTXModel
+
+            dit.transformer_blocks = [dit.transformer_blocks[0]]
+            apply_quantization(dit, weights)
+            non_block = [(k, v) for k, v in weights.items() if not k.startswith("transformer_blocks.")]
+            dit.load_weights(non_block, strict=False)
+            streamer = BlockStreamer(transformer_path, block_prefix="transformer.transformer_blocks.")
+            dit = StreamingLTXModel(dit, streamer)
+        else:
+            apply_quantization(dit, weights)
+            dit.load_weights(list(weights.items()))
         aggressive_cleanup()
         return dit
 
@@ -310,12 +332,10 @@ class TextToVideoPipeline:
                 self.text_encoder = None
                 aggressive_cleanup()
 
-            self.dit = LTXModel()
             transformer_path = model_dir / "transformer.safetensors"
             if not transformer_path.exists():
                 # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
                 transformer_path = model_dir / "transformer-distilled.safetensors"
-            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
 
             # Fuse pending LoRA weights before loading into model
             pending_loras = getattr(self, "_pending_loras", None)
@@ -325,30 +345,14 @@ class TextToVideoPipeline:
                         "low_ram_streaming is incompatible with on-the-fly LoRA fusion. "
                         "Either disable streaming or pre-fuse LoRAs into the safetensors file."
                     )
+                transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
                 transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
-
-            if self.low_ram_streaming:
-                # Streaming path: drop blocks 1..47 BEFORE quantization so
-                # apply_quantization only materializes block 0's weights
-                # (instead of 48 blocks of random init that immediately get
-                # forced into Metal-resident memory). Then load only the
-                # non-block weights via load_weights, and wrap the model
-                # so each forward streams one block at a time from mmap.
-                from ltx_core_mlx.loader.block_streaming import BlockStreamer, StreamingLTXModel
-
-                self.dit.transformer_blocks = [self.dit.transformer_blocks[0]]
-                apply_quantization(self.dit, transformer_weights)
-                non_block_weights = [
-                    (k, v) for k, v in transformer_weights.items() if not k.startswith("transformer_blocks.")
-                ]
-                self.dit.load_weights(non_block_weights, strict=False)
-
-                streamer = BlockStreamer(transformer_path, block_prefix="transformer.transformer_blocks.")
-                self.dit = StreamingLTXModel(self.dit, streamer)
-            else:
+                self.dit = LTXModel()
                 apply_quantization(self.dit, transformer_weights)
                 self.dit.load_weights(list(transformer_weights.items()))
-            aggressive_cleanup()
+                aggressive_cleanup()
+            else:
+                self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 
         # Stage 3: VAE + audio (smaller components)
         self._load_decoders()

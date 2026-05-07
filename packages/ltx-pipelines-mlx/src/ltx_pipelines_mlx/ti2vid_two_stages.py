@@ -121,18 +121,34 @@ class TwoStagePipeline(TextToVideoPipeline):
         model_dir: str,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
+        low_ram_streaming: bool = False,
         dev_transformer: str = "transformer-dev.safetensors",
         distilled_lora: str = "ltx-2.3-22b-distilled-lora-384.safetensors",
         distilled_lora_strength: float = 1.0,
     ):
-        super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        super().__init__(
+            model_dir,
+            gemma_model_id=gemma_model_id,
+            low_memory=low_memory,
+            low_ram_streaming=low_ram_streaming,
+        )
         self._dev_transformer = dev_transformer
         self._distilled_lora = distilled_lora
         self._distilled_lora_strength = distilled_lora_strength
         self.upsampler: LatentUpsampler | None = None
 
     def _fuse_distilled_lora(self, dit: LTXModel) -> None:
-        """Fuse distilled LoRA weights into a loaded transformer in-place."""
+        """Fuse distilled LoRA weights into a loaded transformer in-place.
+
+        In ``low_ram_streaming`` mode, in-place LoRA fusion would
+        materialize the full transformer (defeating streaming). Instead
+        we swap to the pre-fused ``transformer-distilled.safetensors``
+        produced by mlx-forge — equivalent at default LoRA strength.
+        """
+        if self.low_ram_streaming:
+            self._swap_to_distilled_streamer()
+            return
+
         lora_path = self.model_dir / self._distilled_lora
         if not lora_path.exists():
             raise FileNotFoundError(
@@ -154,6 +170,43 @@ class TwoStagePipeline(TextToVideoPipeline):
 
         fused = apply_loras(model_sd, [lora_with_strength])
         dit.load_weights(list(fused.sd.items()))
+        aggressive_cleanup()
+
+    def _swap_to_distilled_streamer(self) -> None:
+        """Replace the dev-model streamer with one over ``transformer-distilled.safetensors``.
+
+        Used in ``low_ram_streaming`` mode at the stage 1 → stage 2
+        transition: instead of fusing the distilled LoRA into the
+        materialized dev model (which would force materialization of
+        all 48 blocks), point the streamer at the pre-fused distilled
+        file. mlx-forge produces this file at LoRA strength 1.0; the
+        pipeline raises if a non-default strength is requested.
+        """
+        from ltx_core_mlx.loader.block_streaming import BlockStreamer
+
+        if abs(self._distilled_lora_strength - 1.0) > 1e-6:
+            raise NotImplementedError(
+                f"low_ram_streaming requires distilled LoRA strength 1.0 "
+                f"(got {self._distilled_lora_strength}). Custom strengths "
+                f"need on-the-fly LoRA fusion, not yet supported in streaming mode."
+            )
+
+        distilled_path = self.model_dir / "transformer-distilled.safetensors"
+        if not distilled_path.exists():
+            raise FileNotFoundError(
+                f"Pre-fused distilled transformer not found at {distilled_path}. "
+                "low_ram_streaming for two-stage requires the distilled file. "
+                "Use: --model dgrauet/ltx-2.3-mlx-q8"
+            )
+
+        # The current self.dit is a StreamingLTXModel wrapping the dev model.
+        # Build a new streamer over the distilled file and rebind the wrapper's
+        # streamer pointer. The shared block instance is reused.
+        new_streamer = BlockStreamer(distilled_path, block_prefix="transformer.transformer_blocks.")
+        # Close the old streamer to release its mmap'd dict.
+        old_streamer = object.__getattribute__(self.dit, "_streamer")
+        object.__setattr__(self.dit, "_streamer", new_streamer)
+        old_streamer.close()
         aggressive_cleanup()
 
     def _load_upsampler(self, name: str = "spatial_upscaler_x2_v1_1") -> None:

@@ -84,11 +84,17 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         model_dir: str,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
+        low_ram_streaming: bool = False,
         dev_transformer: str | None = None,
         distilled_lora: str | None = None,
         distilled_lora_strength: float = 1.0,
     ):
-        super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        super().__init__(
+            model_dir,
+            gemma_model_id=gemma_model_id,
+            low_memory=low_memory,
+            low_ram_streaming=low_ram_streaming,
+        )
         self._dev_transformer = dev_transformer
         self._distilled_lora = distilled_lora
         self._distilled_lora_strength = distilled_lora_strength
