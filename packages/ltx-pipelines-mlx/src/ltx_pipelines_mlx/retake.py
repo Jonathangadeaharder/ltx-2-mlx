@@ -90,57 +90,55 @@ class RetakePipeline(BasePipeline):
         self,
         video_path: str | Path,
     ) -> tuple[mx.array, mx.array, _SourceMeta]:
-        """Probe the source video, encode video + audio latents, free encoders.
+        """Probe the source video, encode video + audio latents via blocks, free.
 
-        Returns the encoded latents along with metadata (height / width / fps /
-        VAE-compatible frame count) needed by retake/extend callers.
+        Composes :class:`ImageConditioner` (video VAE encoder) and
+        :class:`AudioConditioner` (audio VAE + processor) blocks rather
+        than reaching for inherited ``self._load_*`` methods.
         """
-        self._load_vae_encoder()
-        self._load_audio_encoder()
-        assert self.vae_encoder is not None
-
         video_path = str(video_path)
         info = probe_video_info(video_path)
-
-        # Round down to VAE-compatible frame count (1 + 8k) that fits in the source.
+        # Round down to VAE-compatible frame count (1 + 8k).
         k = max(1, (info.num_frames - 1) // 8)
         vae_compatible_frames = 1 + k * 8
 
+        # Encode video via ImageConditioner (loads → encodes → frees)
         video_tensor = load_video_frames(video_path, info.height, info.width, vae_compatible_frames)
-        video_latent = self.vae_encoder.encode(video_tensor)
-        mx.synchronize()
+
+        def _encode_video(encoder) -> mx.array:
+            latent = encoder.encode(video_tensor)
+            mx.synchronize()
+            return latent
+
+        video_latent = self.image_conditioner(_encode_video, free_after=self.low_memory)
         if self.low_memory:
             del video_tensor
             aggressive_cleanup()
 
+        # Encode audio via AudioConditioner (loads → encodes → frees) if present
         audio_latent: mx.array | None = None
         if info.has_audio:
-            assert self.audio_encoder is not None
-            assert self.audio_processor is not None
             audio_data = load_audio(
                 video_path,
                 target_sample_rate=16000,
                 max_duration=vae_compatible_frames / info.fps,
             )
             if audio_data is not None:
-                audio_latent = encode_audio(
-                    audio_data.waveform,
-                    audio_data.sample_rate,
-                    self.audio_encoder,
-                    self.audio_processor,
-                )
+
+                def _encode_audio(enc, proc) -> mx.array:
+                    return encode_audio(audio_data.waveform, audio_data.sample_rate, enc, proc)
+
+                audio_latent = self.audio_conditioner(_encode_audio, free_after=self.low_memory)
                 if self.low_memory:
                     aggressive_cleanup()
+            elif self.low_memory:
+                self.audio_conditioner.free()
+        elif self.low_memory:
+            self.audio_conditioner.free()
 
         if audio_latent is None:
             audio_T = compute_audio_token_count(vae_compatible_frames)
             audio_latent = mx.zeros((1, 8, audio_T, 16), dtype=mx.bfloat16)
-
-        if self.low_memory:
-            self.vae_encoder = None
-            self.audio_encoder = None
-            self.audio_processor = None
-            aggressive_cleanup()
 
         meta = _SourceMeta(
             height=info.height,
