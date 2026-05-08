@@ -55,6 +55,9 @@ ltx-2-mlx generate --prompt "A scene" --hq --stage1-steps 20 -o hq.mp4
 # Distilled two-stage (fast, half-res + upscale, mirrors upstream DistilledPipeline)
 ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -o distilled.mp4
 
+# Dev one-stage (CFG quality at full target resolution, mirrors upstream TI2VidOneStagePipeline)
+ltx-2-mlx generate --prompt "A scene" --dev -o dev.mp4
+
 # Audio-to-Video
 ltx-2-mlx a2v --prompt "Music video" --audio music.wav -o a2v.mp4
 

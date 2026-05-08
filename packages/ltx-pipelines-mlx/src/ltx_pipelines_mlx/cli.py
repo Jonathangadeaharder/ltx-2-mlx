@@ -151,6 +151,11 @@ examples:
         action="store_true",
         help="Distilled two-stage pipeline (half-res distilled + upscale + distilled refine, no CFG). Mirrors upstream DistilledPipeline.",
     )
+    gen.add_argument(
+        "--dev",
+        action="store_true",
+        help="Dev model + CFG one-stage at full target resolution (no upsampler, no stage 2). Mirrors upstream TI2VidOneStagePipeline. Higher quality than --distilled at small resolutions; slower than --two-stage at large.",
+    )
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
     gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
     gen.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
@@ -404,10 +409,47 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             "TeaCache (only 8 denoising steps)."
         )
 
-    if sum(map(bool, (args.hq, args.two_stage, args.distilled))) > 1:
-        raise SystemExit("Choose at most one of --two-stage, --hq, --distilled.")
+    if sum(map(bool, (args.hq, args.two_stage, args.distilled, args.dev))) > 1:
+        raise SystemExit("Choose at most one of --two-stage, --hq, --distilled, --dev.")
 
-    if args.distilled:
+    if args.dev:
+        from ltx_pipelines_mlx.ti2vid_one_stage_dev import DevOneStagePipeline
+
+        if not args.quiet:
+            print("Mode: Dev One-Stage (Euler + CFG at full resolution)")
+            print(f"  Model: {args.model}")
+
+        pipe = DevOneStagePipeline(
+            model_dir=args.model,
+            gemma_model_id=args.gemma,
+            low_memory=True,
+            low_ram_streaming=getattr(args, "low_ram", False),
+            dev_transformer=args.dev_transformer,
+            tile_count=_build_tile_count_config(args),
+        )
+        if lora_paths:
+            pipe._pending_loras = lora_paths
+        kwargs: dict = dict(
+            prompt=prompt,
+            output_path=args.output,
+            height=args.height,
+            width=args.width,
+            num_frames=args.frames,
+            seed=args.seed,
+            image=args.image,
+        )
+        # The dev one-stage pipeline uses `num_steps` (single sampler), not stage1/stage2.
+        if args.stage1_steps is not None:
+            kwargs["num_steps"] = args.stage1_steps
+        elif args.steps is not None:
+            kwargs["num_steps"] = args.steps
+        if args.cfg_scale is not None:
+            kwargs["cfg_scale"] = args.cfg_scale
+        if args.stg_scale is not None:
+            kwargs["stg_scale"] = args.stg_scale
+        pipe.generate_and_save(**kwargs)
+
+    elif args.distilled:
         from ltx_pipelines_mlx.distilled import DistilledPipeline
 
         if not args.quiet:
