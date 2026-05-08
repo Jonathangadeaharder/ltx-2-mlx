@@ -87,10 +87,10 @@ class BasePipeline:
             VideoDecoder as _VideoDecoderBlock,
         )
 
-        self._prompt_encoder = _PromptEncoderBlock(self.model_dir, gemma_model_id)
-        self._image_conditioner = _ImageConditionerBlock(self.model_dir)
-        self._video_decoder = _VideoDecoderBlock(self.model_dir)
-        self._audio_decoder_block = _AudioDecoderBlock(self.model_dir)
+        self.prompt_encoder = _PromptEncoderBlock(self.model_dir, gemma_model_id)
+        self.image_conditioner = _ImageConditionerBlock(self.model_dir)
+        self.video_decoder_block = _VideoDecoderBlock(self.model_dir)
+        self.audio_decoder_block = _AudioDecoderBlock(self.model_dir)
 
         # Audio encoder block is loaded lazily by retake/extend only.
         self._audio_encoder: object | None = None
@@ -108,51 +108,51 @@ class BasePipeline:
 
     @property
     def text_encoder(self) -> GemmaLanguageModel | None:
-        return self._prompt_encoder._text_encoder
+        return self.prompt_encoder._text_encoder
 
     @text_encoder.setter
     def text_encoder(self, value: GemmaLanguageModel | None) -> None:
-        self._prompt_encoder._text_encoder = value
+        self.prompt_encoder._text_encoder = value
 
     @property
     def feature_extractor(self) -> GemmaFeaturesExtractorV2 | None:
-        return self._prompt_encoder._feature_extractor
+        return self.prompt_encoder._feature_extractor
 
     @feature_extractor.setter
     def feature_extractor(self, value: GemmaFeaturesExtractorV2 | None) -> None:
-        self._prompt_encoder._feature_extractor = value
+        self.prompt_encoder._feature_extractor = value
 
     @property
     def vae_encoder(self) -> VideoEncoder | None:
-        return self._image_conditioner._encoder
+        return self.image_conditioner._encoder
 
     @vae_encoder.setter
     def vae_encoder(self, value: VideoEncoder | None) -> None:
-        self._image_conditioner._encoder = value
+        self.image_conditioner._encoder = value
 
     @property
     def vae_decoder(self) -> VideoDecoder | None:
-        return self._video_decoder._decoder
+        return self.video_decoder_block._decoder
 
     @vae_decoder.setter
     def vae_decoder(self, value: VideoDecoder | None) -> None:
-        self._video_decoder._decoder = value
+        self.video_decoder_block._decoder = value
 
     @property
     def audio_decoder(self) -> AudioVAEDecoder | None:
-        return self._audio_decoder_block._audio_decoder
+        return self.audio_decoder_block._audio_decoder
 
     @audio_decoder.setter
     def audio_decoder(self, value: AudioVAEDecoder | None) -> None:
-        self._audio_decoder_block._audio_decoder = value
+        self.audio_decoder_block._audio_decoder = value
 
     @property
     def vocoder(self) -> VocoderWithBWE | None:
-        return self._audio_decoder_block._vocoder
+        return self.audio_decoder_block._vocoder
 
     @vocoder.setter
     def vocoder(self, value: VocoderWithBWE | None) -> None:
-        self._audio_decoder_block._vocoder = value
+        self.audio_decoder_block._vocoder = value
 
     @property
     def audio_encoder(self) -> object | None:
@@ -216,7 +216,7 @@ class BasePipeline:
 
     def _load_text_encoder(self) -> None:
         """Load Gemma + connector via the :class:`PromptEncoder` block."""
-        self._prompt_encoder.load()
+        self.prompt_encoder.load()
 
     def _encode_text_with_negative(self, prompt: str) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Load text encoder, encode prompt + negative prompt, materialize, free encoder.
@@ -240,7 +240,7 @@ class BasePipeline:
 
     def _load_vae_encoder(self) -> None:
         """Load VAE encoder via the :class:`ImageConditioner` block."""
-        self._image_conditioner.load()
+        self.image_conditioner.load()
 
     def _load_audio_encoder(self) -> None:
         """Load audio VAE encoder + processor if not already loaded."""
@@ -261,8 +261,8 @@ class BasePipeline:
 
     def _load_decoders(self) -> None:
         """Load VAE decoder + audio decoder + vocoder via composition blocks."""
-        self._video_decoder.load()
-        self._audio_decoder_block.load()
+        self.video_decoder_block.load()
+        self.audio_decoder_block.load()
 
     def _load_dev_transformer(self) -> LTXModel:
         """Load the dev (non-distilled) transformer weights.
@@ -434,9 +434,9 @@ class BasePipeline:
         """Encode prompt to (video, audio) embeddings via the PromptEncoder block.
 
         Inheritance-API thin wrapper. New code should prefer
-        ``self._prompt_encoder(prompt)`` directly (composition style).
+        ``self.prompt_encoder(prompt)`` directly (composition style).
         """
-        return self._prompt_encoder.encode(prompt)
+        return self.prompt_encoder.encode(prompt)
 
     def generate(
         self,
