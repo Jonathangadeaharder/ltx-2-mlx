@@ -6,6 +6,7 @@ Ported from ltx-core/src/ltx_core/text_encoders/gemma/encoders/base_encoder.py
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import mlx.core as mx
@@ -139,23 +140,22 @@ class GemmaLanguageModel(nn.Module):
         else:
             combined_mask = causal_mask[None, None, :, :]  # (1, 1, T, T)
 
-        # Run layers with combined mask.
-        # Periodically evaluate to prevent the lazy computation graph from
-        # growing unbounded. Without this, all 48 layers accumulate into a
-        # single massive Metal command buffer that can exceed the macOS GPU
-        # watchdog timeout (kIOGPUCommandBufferCallbackErrorImpactingInteractivity),
-        # especially under thermal throttling after a prior long run.
-        eval_every = 1
+        # Default: 100% lazy (mirrors ernie-image-mlx and other healthy MLX
+        # ports). Counter-intuitively, forced per-layer mx.eval/synchronize
+        # HURTS under macOS GPU contention: each command buffer queues behind
+        # system processes (mds_stores, knowledgeconstructiond, OS update
+        # staging) and waits for the Metal queue to drain instead of letting
+        # the driver batch kernels efficiently. LTX2_GEMMA_EVAL_EVERY=N opts
+        # back into per-layer eval if you actually need it (debugging, very
+        # large prompts on capable hardware).
+        eval_every = int(os.environ.get("LTX2_GEMMA_EVAL_EVERY", "0"))
         for i, layer in enumerate(inner.layers):
             h = layer(h, mask=combined_mask, cache=None)
             if isinstance(h, tuple):
                 h = h[0]
             all_hidden_states.append(h)
-            if (i + 1) % eval_every == 0:
+            if eval_every and (i + 1) % eval_every == 0:
                 mx.eval(h)
-                # Optional GPU sync between layers when the macOS Metal
-                # watchdog guard is enabled (LTX2_METAL_WATCHDOG_GUARD=1).
-                # No-op otherwise — keeps full pipelining on capable hosts.
                 from ltx_core_mlx.utils.metal_watchdog import flush as _watchdog_flush
 
                 _watchdog_flush()
